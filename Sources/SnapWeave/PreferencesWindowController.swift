@@ -204,8 +204,8 @@ final class PreferencesWindowController: NSWindowController {
     }
 
     private func aboutView() -> NSView {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.11.1"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "17"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.11.2"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "18"
         return vertical([label("SnapWeave \(version) (\(build))"), secondary("原生 macOS 截图工具 · MIT License\nApple Silicon · macOS 14 或更高版本")])
     }
 
