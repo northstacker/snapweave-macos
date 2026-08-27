@@ -22,11 +22,11 @@ jobs:
         run: ./scripts/build-app.sh
       - name: Verify ZIP and checksum
         run: |
-          unzip -t outputs/SnapWeave-0.11.1-arm64.zip
-          shasum -a 256 outputs/SnapWeave-0.11.1-arm64.zip | tee outputs/SnapWeave-0.11.1-arm64.zip.sha256
+          unzip -t outputs/SnapWeave-0.11.2-arm64.zip
+          shasum -a 256 outputs/SnapWeave-0.11.2-arm64.zip | tee outputs/SnapWeave-0.11.2-arm64.zip.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: SnapWeave-0.11.1-arm64
+          name: SnapWeave-0.11.2-arm64
           path: |
-            outputs/SnapWeave-0.11.1-arm64.zip
-            outputs/SnapWeave-0.11.1-arm64.zip.sha256
+            outputs/SnapWeave-0.11.2-arm64.zip
+            outputs/SnapWeave-0.11.2-arm64.zip.sha256

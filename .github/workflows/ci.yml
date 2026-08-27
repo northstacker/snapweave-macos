@@ -37,4 +37,4 @@ jobs:
       - name: Build and verify ad-hoc package
         run: |
           ./scripts/build-app.sh
-          unzip -t outputs/SnapWeave-0.11.1-arm64.zip
+          unzip -t outputs/SnapWeave-0.11.2-arm64.zip
