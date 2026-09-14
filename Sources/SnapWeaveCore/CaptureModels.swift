@@ -101,7 +101,7 @@ public enum OverlapEstimate: Equatable, Sendable {
     case insufficient(confidence: Double, coverage: Double)
 }
 
-public enum StitchError: LocalizedError, Equatable {
+public enum StitchError: LocalizedError, Equatable, SnapWeaveError {
     case incompatibleFrameSize
     case noReliableOverlap(confidence: Double)
     case directionReversed
@@ -117,4 +117,25 @@ public enum StitchError: LocalizedError, Equatable {
         case .cannotCreateImage: "无法生成拼接图片。"
         }
     }
+
+    public var errorCode: String {
+        switch self {
+        case .incompatibleFrameSize: "STITCH-VIEWPORT"
+        case .noReliableOverlap: "STITCH-OVERLAP"
+        case .directionReversed: "STITCH-DIRECTION"
+        case .limitReached: "STITCH-LIMIT"
+        case .cannotCreateImage: "STITCH-OUTPUT"
+        }
+    }
+
+    public var userMessage: String { errorDescription ?? "长截图处理失败。" }
+    public var recoverySuggestion: String? {
+        switch self {
+        case .incompatibleFrameSize, .directionReversed: "恢复窗口大小和滚动方向后重试当前段。"
+        case .noReliableOverlap: "让画面稳定并保留更多重叠区域后重试。"
+        case .limitReached: "缩小选区或完成当前已拼接部分。"
+        case .cannotCreateImage: "检查磁盘空间后重试。"
+        }
+    }
+    public var isRetryable: Bool { self != .limitReached }
 }

@@ -40,4 +40,12 @@ public final class CaptureContentProvider {
         cachedContent = nil
         cachedAt = .distantPast
     }
+
+    /// Explicitly cancel an outstanding discovery and release its captured
+    /// shareable-content graph when the app is going inactive or terminating.
+    public func cancelPendingRequest() {
+        inFlight?.cancel()
+        inFlight = nil
+        invalidate()
+    }
 }

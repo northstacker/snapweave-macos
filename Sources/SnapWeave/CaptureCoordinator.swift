@@ -9,6 +9,7 @@ final class CaptureCoordinator {
     var onGIFRecordingStateChange: ((Bool) -> Void)?
     private let service = ScreenCaptureService()
     private let sessionRegistry = CaptureSessionRegistry()
+    private let sessionScheduler = CaptureSessionScheduler()
     private var selectionController: SelectionOverlayController?
     private var pinSelectionController: SelectionOverlayController?
     private var textSelectionController: SelectionOverlayController?
@@ -23,6 +24,7 @@ final class CaptureCoordinator {
     private var gifPreviewController: GIFPreviewWindowController?
     private var gifSession: GIFRecordingSession?
     private var gifCountdownTask: Task<Void, Never>?
+    private var gifToken: CaptureSessionToken?
 
     var isGIFRecording: Bool { gifSession != nil }
     private var isGIFFlowActive: Bool {
@@ -40,12 +42,16 @@ final class CaptureCoordinator {
         guard allowCaptureWhileNotRecordingGIF() else { return }
         guard ensureCapturePermission() else { return }
         selectionController?.dismiss()
-        let token = sessionRegistry.begin(.selecting)
+        let kind: CaptureSessionKind = mode == .standard ? .standard : .scrolling
+        guard let token = beginSession(kind: kind) else { return }
         let selection = SelectionOverlayController { [weak self] rect in
             self?.selectionController = nil
             guard let self else { return }
-            guard self.sessionRegistry.isCurrent(token) else { return }
-            guard let rect else { self.sessionRegistry.finish(token, state: .cancelled); return }
+            if !self.sessionRegistry.isCurrent(token) {
+                self.finishSession(token)
+                return
+            }
+            guard let rect else { self.finishSession(token, state: .cancelled); return }
             self.sessionRegistry.transition(.capturing, for: token)
             if mode == .standard { self.captureStandard(rect, token: token) }
             else { self.captureScrolling(rect, mode: mode, token: token) }
@@ -57,17 +63,22 @@ final class CaptureCoordinator {
     func beginDelayedCapture() {
         guard allowCaptureWhileNotRecordingGIF() else { return }
         guard ensureCapturePermission() else { return }
+        guard let token = beginSession(kind: .delayed) else { return }
         let selection = SelectionOverlayController { [weak self] rect in
             guard let self else { return }
             delayedSelectionController = nil
-            guard let rect else { return }
+            guard let rect else { self.finishSession(token, state: .cancelled); return }
             let countdown = DelayedCaptureController(selectionRect: rect)
             countdown.onReady = { [weak self, weak countdown] in
                 self?.delayedCaptureController = nil
                 countdown?.onReady = nil
-                self?.captureStandard(rect)
+                self?.sessionRegistry.transition(.capturing, for: token)
+                self?.captureStandard(rect, token: token)
             }
-            countdown.onCancel = { [weak self] in self?.delayedCaptureController = nil }
+            countdown.onCancel = { [weak self] in
+                self?.delayedCaptureController = nil
+                self?.finishSession(token, state: .cancelled)
+            }
             delayedCaptureController = countdown
             countdown.present()
         }
@@ -78,10 +89,12 @@ final class CaptureCoordinator {
     func beginPin() {
         guard allowCaptureWhileNotRecordingGIF() else { return }
         guard ensureCapturePermission() else { return }
+        guard let token = beginSession(kind: .pin) else { return }
         let selection = SelectionOverlayController { [weak self] rect in
             self?.pinSelectionController = nil
-            guard let rect else { return }
-            self?.capturePin(rect)
+            guard let self else { return }
+            guard let rect else { self.finishSession(token, state: .cancelled); return }
+            self.capturePin(rect, token: token)
         }
         pinSelectionController = selection
         selection.begin()
@@ -90,10 +103,12 @@ final class CaptureCoordinator {
     func beginTextExtraction() {
         guard allowCaptureWhileNotRecordingGIF() else { return }
         guard ensureCapturePermission() else { return }
+        guard let token = beginSession(kind: .textExtraction) else { return }
         let selection = SelectionOverlayController { [weak self] rect in
             self?.textSelectionController = nil
-            guard let rect else { return }
-            self?.captureText(rect)
+            guard let self else { return }
+            guard let rect else { self.finishSession(token, state: .cancelled); return }
+            self.captureText(rect, token: token)
         }
         textSelectionController = selection
         selection.begin()
@@ -106,11 +121,13 @@ final class CaptureCoordinator {
             return
         }
         guard ensureCapturePermission() else { return }
+        guard let token = beginSession(kind: .gif) else { return }
+        gifToken = token
         notifyGIFState()
         let selection = SelectionOverlayController { [weak self] rect in
             guard let self else { return }
             self.gifSelectionController = nil
-            guard let rect else { self.finishGIFFlow(); return }
+            guard let rect else { self.finishGIFFlow(state: .cancelled); return }
             self.configureGIFRecording(rect)
         }
         gifSelectionController = selection
@@ -131,7 +148,7 @@ final class CaptureCoordinator {
         gifControlController?.dismiss()
         gifControlController = nil
         if let session = gifSession { session.stop(cancel: true) }
-        else { finishGIFFlow() }
+        else { finishGIFFlow(state: .cancelled) }
     }
 
     private func configureGIFRecording(_ rect: CGRect) {
@@ -143,11 +160,11 @@ final class CaptureCoordinator {
               abs(screen.frame.intersection(rect).width - rect.width) < 1,
               abs(screen.frame.intersection(rect).height - rect.height) < 1 else {
             show(GIFRecordingError.selectionCrossesDisplays)
-            finishGIFFlow()
+            finishGIFFlow(state: .failed)
             return
         }
         let controller = GIFRecordingConfigurationController(selectionRect: rect, screen: screen)
-        controller.onCancel = { [weak self] in self?.finishGIFFlow() }
+        controller.onCancel = { [weak self] in self?.finishGIFFlow(state: .cancelled) }
         controller.onStart = { [weak self] options in
             self?.gifConfigurationController = nil
             self?.startGIFCountdown(rect: rect, screen: screen, options: options)
@@ -195,7 +212,7 @@ final class CaptureCoordinator {
             gifControlController?.dismiss()
             gifControlController = nil
             if !(error is CancellationError) { show(error) }
-            finishGIFFlow()
+            finishGIFFlow(state: .failed)
         }
     }
 
@@ -212,10 +229,10 @@ final class CaptureCoordinator {
             alert.runModal()
             presentGIFPreview(error.result)
         case let .failure(error) where error is CancellationError:
-            finishGIFFlow()
+            finishGIFFlow(state: .cancelled)
         case let .failure(error):
             show(error)
-            finishGIFFlow()
+            finishGIFFlow(state: .failed)
         }
     }
 
@@ -224,6 +241,10 @@ final class CaptureCoordinator {
         controller.onAction = { [weak self] action in
             guard let self else { return }
             self.gifPreviewController = nil
+            if let token = self.gifToken {
+                self.finishSession(token, state: action == .rerecord ? .cancelled : .completed)
+                self.gifToken = nil
+            }
             self.notifyGIFState()
             if action == .rerecord { self.beginGIFRecording() }
         }
@@ -233,7 +254,7 @@ final class CaptureCoordinator {
         notifyGIFState()
     }
 
-    private func finishGIFFlow() {
+    private func finishGIFFlow(state: CaptureSessionState = .completed) {
         gifCountdownTask?.cancel()
         gifCountdownTask = nil
         gifSelectionController = nil
@@ -242,6 +263,10 @@ final class CaptureCoordinator {
         gifControlController = nil
         gifSession = nil
         gifPreviewController = nil
+        if let token = gifToken {
+            finishSession(token, state: state)
+            gifToken = nil
+        }
         notifyGIFState()
     }
 
@@ -286,35 +311,44 @@ final class CaptureCoordinator {
         Task {
             do {
                 let image = try await service.capture(globalRect: rect)
-                if let token { guard sessionRegistry.isCurrent(token) else { return } }
+                if let token, !sessionRegistry.isCurrent(token) {
+                    finishSession(token)
+                    return
+                }
                 let historyID = ScreenshotHistoryService.shared.create(image: image, displaySize: rect.size, kind: .standard)
                 let controller = StandardCaptureOverlayController(image: image, globalRect: rect, historyID: historyID) { [weak self] in
                     guard let self else { return }
                     self.standardController = nil
-                    if let token { self.sessionRegistry.finish(token) }
+                    if let token { self.finishSession(token) }
                 }
                 standardController = controller
                 if let token { sessionRegistry.transition(.editing, for: token) }
                 controller.begin()
             } catch {
-                if let token { sessionRegistry.finish(token, state: .failed) }
+                if let token, !sessionRegistry.isCurrent(token) {
+                    finishSession(token, state: .failed)
+                    return
+                }
+                if let token { finishSession(token, state: .failed) }
                 show(error)
             }
         }
     }
 
-    private func capturePin(_ rect: CGRect) {
+    private func capturePin(_ rect: CGRect, token: CaptureSessionToken) {
         Task {
             do {
                 let image = try await service.capture(globalRect: rect)
                 PinWindowController(image: image, displaySize: rect.size, preferredFrame: rect).present()
+                finishSession(token)
             } catch {
+                finishSession(token, state: .failed)
                 show(error)
             }
         }
     }
 
-    private func captureText(_ rect: CGRect) {
+    private func captureText(_ rect: CGRect, token: CaptureSessionToken) {
         let controller = OCRResultWindowController.presentRecognizing { [weak self] in
             self?.beginTextExtraction()
         }
@@ -322,7 +356,9 @@ final class CaptureCoordinator {
             do {
                 let image = try await service.capture(globalRect: rect)
                 controller.recognize(image, displaySize: rect.size)
+                finishSession(token)
             } catch {
+                finishSession(token, state: .failed)
                 controller.fail(with: error)
             }
         }
@@ -333,7 +369,10 @@ final class CaptureCoordinator {
         do {
             let controller = try ScrollCaptureController(rect: rect, axis: axis, captureService: service) { [weak self] result in
                 guard let self else { return }
-                guard token.map({ self.sessionRegistry.isCurrent($0) }) ?? true else { return }
+                if let token, !self.sessionRegistry.isCurrent(token) {
+                    self.finishSession(token)
+                    return
+                }
                 self.scrollController = nil
                 switch result {
                 case let .success(image):
@@ -344,16 +383,16 @@ final class CaptureCoordinator {
                         sessionToken: token
                     )
                 case let .failure(error) where error is CancellationError:
-                    if let token { self.sessionRegistry.finish(token, state: .cancelled) }
+                    if let token { self.finishSession(token, state: .cancelled) }
                 case let .failure(error):
-                    if let token { self.sessionRegistry.finish(token, state: .failed) }
+                    if let token { self.finishSession(token, state: .failed) }
                     self.show(error)
                 }
             }
             scrollController = controller
             controller.begin()
         } catch {
-            if let token { sessionRegistry.finish(token, state: .failed) }
+            if let token { finishSession(token, state: .failed) }
             show(error)
         }
     }
@@ -365,7 +404,10 @@ final class CaptureCoordinator {
     ) {
         Task { [weak self] in
             guard let self else { return }
-            if let sessionToken { guard sessionRegistry.isCurrent(sessionToken) else { return } }
+            if let sessionToken, !sessionRegistry.isCurrent(sessionToken) {
+                finishSession(sessionToken)
+                return
+            }
             let displaySize = CGSize(width: image.width, height: image.height)
             let historyID: UUID? = if let kind {
                 ScreenshotHistoryService.shared.create(image: image, displaySize: displaySize, kind: kind)
@@ -406,7 +448,7 @@ final class CaptureCoordinator {
         ) { [weak self] controller in
             guard let self else { return }
             self.editorControllers.removeAll { $0 === controller }
-            if let sessionToken { self.sessionRegistry.finish(sessionToken) }
+            if let sessionToken { self.finishSession(sessionToken) }
         }
         editorControllers.append(controller)
         controller.showWindow(nil)
@@ -414,7 +456,27 @@ final class CaptureCoordinator {
     }
 
     private func show(_ error: Error) {
-        let alert = NSAlert(error: error)
+        let userError = UserFacingError(error: error)
+        DiagnosticLogger.shared.log("error", "presented", fields: ["code": userError.errorCode, "retryable": userError.isRetryable ? "true" : "false"])
+        let alert = NSAlert(error: userError)
         alert.runModal()
+    }
+
+    private func beginSession(kind: CaptureSessionKind) -> CaptureSessionToken? {
+        let token = CaptureSessionToken(id: UUID())
+        guard sessionScheduler.register(token, kind: kind) else {
+            let alert = NSAlert()
+            alert.messageText = "当前已有捕获任务"
+            alert.informativeText = kind == .gif ? "请先完成当前截图或长截图。" : "请先停止正在进行的长截图或 GIF 录制。"
+            alert.runModal()
+            return nil
+        }
+        sessionRegistry.begin(token, initialState: .selecting)
+        return token
+    }
+
+    private func finishSession(_ token: CaptureSessionToken, state: CaptureSessionState = .completed) {
+        sessionScheduler.finish(token)
+        sessionRegistry.finish(token, state: state)
     }
 }

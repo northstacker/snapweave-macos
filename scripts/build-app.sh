@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 OUTPUT="$ROOT/outputs"
 APP="$OUTPUT/SnapWeave.app"
-ZIP="$OUTPUT/SnapWeave-0.11.2-arm64.zip"
+ZIP="$OUTPUT/SnapWeave-0.12.0-arm64.zip"
 
 cd "$ROOT"
 swift build -c release --product SnapWeave --arch arm64

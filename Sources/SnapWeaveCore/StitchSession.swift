@@ -14,6 +14,8 @@ public final class StitchSession: @unchecked Sendable {
     private let estimator: OverlapEstimator
     private var lastFrame: CGImage?
     private var segments: [(url: URL, size: CGSize)] = []
+    private var pendingSegments: [(image: CGImage, prepend: Bool)] = []
+    private var nextSegmentIndex = 0
     private let directory: URL
     private var consecutiveFailures = 0
     private let lock = NSLock()
@@ -34,7 +36,7 @@ public final class StitchSession: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard let previous = lastFrame else {
-            try store(frame, prepend: false)
+            try enqueue(frame, prepend: false)
             lastFrame = frame
             frameCount = 1
             pixelSize = CGSize(width: frame.width, height: frame.height)
@@ -58,7 +60,7 @@ public final class StitchSession: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard let previous = lastFrame else {
-            try store(frame, prepend: false)
+            try enqueue(frame, prepend: false)
             lastFrame = frame
             frameCount = 1
             pixelSize = CGSize(width: frame.width, height: frame.height)
@@ -102,6 +104,9 @@ public final class StitchSession: @unchecked Sendable {
     public func writeCheckpoint() throws -> StitchCheckpoint {
         lock.lock()
         defer { lock.unlock() }
+        // Flush before taking the metadata snapshot so checkpoint segmentNames
+        // always describe every accepted frame on disk.
+        try flushPendingSegments()
         let checkpoint = StitchCheckpoint(
             axis: axis,
             frameCount: frameCount,
@@ -144,7 +149,7 @@ public final class StitchSession: @unchecked Sendable {
               Int(proposed.width * proposed.height) <= limits.maximumPixelCount else {
             throw StitchError.limitReached
         }
-        try store(strip, prepend: match.direction == .backward)
+        try enqueue(strip, prepend: match.direction == .backward)
         lastFrame = frame
         frameCount += 1
         pixelSize = proposed
@@ -154,6 +159,7 @@ public final class StitchSession: @unchecked Sendable {
     public func render() throws -> CGImage {
         lock.lock()
         defer { lock.unlock() }
+        try flushPendingSegments()
         let width = Int(pixelSize.width)
         let height = Int(pixelSize.height)
         guard width > 0, height > 0,
@@ -186,7 +192,8 @@ public final class StitchSession: @unchecked Sendable {
     }
 
     private func store(_ image: CGImage, prepend: Bool) throws {
-        let url = directory.appendingPathComponent(String(format: "%06d.png", frameCount))
+        let url = directory.appendingPathComponent(String(format: "%06d.png", nextSegmentIndex))
+        nextSegmentIndex += 1
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
             throw StitchError.cannotCreateImage
         }
@@ -194,5 +201,28 @@ public final class StitchSession: @unchecked Sendable {
         guard CGImageDestinationFinalize(destination) else { throw StitchError.cannotCreateImage }
         let entry = (url, CGSize(width: image.width, height: image.height))
         if prepend { segments.insert(entry, at: 0) } else { segments.append(entry) }
+    }
+
+    /// Most scrolling is forward. Keep a bounded batch of strips in memory and
+    /// flush it as one disk transaction; backward inserts are flushed eagerly
+    /// so their ordering stays exact.
+    private func enqueue(_ image: CGImage, prepend: Bool) throws {
+        if prepend {
+            try store(image, prepend: true)
+            return
+        }
+        pendingSegments.append((image, false))
+        if pendingSegments.count >= 8 { try flushPendingSegments() }
+    }
+
+    private func flushPendingSegments() throws {
+        guard !pendingSegments.isEmpty else { return }
+        // Remove each entry only after a successful encode. If disk I/O fails,
+        // the unflushed tail remains available for a later retry/checkpoint.
+        while !pendingSegments.isEmpty {
+            let segment = pendingSegments[0]
+            try store(segment.image, prepend: segment.prepend)
+            pendingSegments.removeFirst()
+        }
     }
 }
