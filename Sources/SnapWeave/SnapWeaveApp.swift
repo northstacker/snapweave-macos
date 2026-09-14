@@ -135,6 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         coordinator.cancelGIFRecording()
+        CaptureContentProvider.shared.cancelPendingRequest()
         historyService.stop()
         GIFTemporaryFiles.cleanupStaleFiles()
         DiagnosticLogger.shared.finishSession()

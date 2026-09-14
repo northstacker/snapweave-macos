@@ -19,6 +19,7 @@ struct ArchitectureChecks {
         do {
             try checkAnnotationCommands()
             try checkCaptureSessionIsolation()
+            try checkCaptureSessionScheduling()
             try await checkSQLiteTransactions()
             print("✓ SnapWeave 架构检查全部通过")
         } catch {
@@ -38,6 +39,22 @@ struct ArchitectureChecks {
         try expect(registry.transition(.editing, for: current), "当前捕获会话无法推进")
         registry.finish(current)
         try expect(registry.current == nil && registry.state == .idle, "捕获会话未幂等清理")
+    }
+
+    @MainActor
+    private static func checkCaptureSessionScheduling() throws {
+        let scheduler = CaptureSessionScheduler()
+        let scrolling = CaptureSessionToken(id: UUID())
+        let gif = CaptureSessionToken(id: UUID())
+        try expect(scheduler.register(scrolling, kind: .scrolling), "首个长截图会话不应被拒绝")
+        try expect(!scheduler.canStart(.standard), "长截图期间不应启动普通截图")
+        try expect(!scheduler.canStart(.gif), "长截图期间不应启动 GIF")
+        scheduler.finish(scrolling)
+        try expect(scheduler.register(gif, kind: .gif), "空闲时 GIF 会话无法启动")
+        try expect(!scheduler.canStart(.standard), "GIF 期间不应启动普通截图")
+        try expect(!scheduler.canStart(.pin), "GIF 期间不应启动其他捕获")
+        scheduler.finish(gif)
+        try expect(scheduler.activeCount == 0, "调度器会话未清理")
     }
 
     private static func checkAnnotationCommands() throws {
